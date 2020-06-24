@@ -46,11 +46,7 @@
 #define PIN_Buzzer              9
 #define PIN_RelayTransistor     12
 #define PIN_TempSensors         13
-/*
-  #define PID_Kp              0.5   // Find this by auto tune!
-  #define PID_Ki              0.1
-  #define PID_Kd              0.0
-*/
+
 #define PID_Kp              100   // Find this by auto tune!
 #define PID_Ki              0.1
 #define PID_Kd              5.0
@@ -92,6 +88,15 @@
 /* ======================== GLOBAL VARIABLES ========================= */
 
 
+// =============== Mode handling ===============
+
+enum            Mode {MODE_check, MODE_start, MODE_setTemp, MODE_setTime, MODE_warmUp, MODE_ready, MODE_cook, MODE_editParams, MODE_manual, MODE_error, MODE_stop};
+String          operatingModeName[3] = {"Automatic       ", "Manual          ", "Edit parameters "};
+Mode            mode = MODE_check;
+byte            lastMode = MODE_check;
+byte            lastError = 0;
+unsigned long   modeTimer = 0; // Generic, mode common timer
+
 // =============== Scroll Wheel sensor ===============
 volatile unsigned int tmpA = 0;
 volatile unsigned int tmpB = 0;
@@ -102,15 +107,6 @@ volatile float        oldVal = 0.0;
 volatile float        swIncrement = 0.1;
 bool                  scrollWheelEnabled = false;
 
-// =============== Mode handling ===============
-byte            operatingMode = 0; // 0 = "Automatic", 1 = "Manual", 2 = "Edit parameters"
-String          operatingModeName[3] = {"Automatic       ", "Manual          ", "Edit parameters "};
-byte            mode = 0;
-byte            lastMode = 0;
-unsigned long   tempReadingTime = 0;
-byte            lastError = 0;
-unsigned long   modeTimer = 0; // Generic, mode common timer
-
 // =============== Buttons ===============
 unsigned long OKClickTime = 0;
 unsigned long CancelClickTime = 0;
@@ -120,19 +116,20 @@ bool          currentOKState = false;
 bool          currentCancelState = false;
 
 // =============== Temp sensors ===============
-byte  tempSensorAddress[2][8] = {{0x28, 0xD5, 0x77, 0xCA, 0x06, 0x00, 0x00, 0xFE}, {0x28, 0xFF, 0xCA, 0x7A, 0x86, 0x16, 0x05, 0xAE}};
-float tempHeaterCurrent = 0.00;
-float tempWaterCurrent =  0.00;
-float tempWaterAim =      57.00;
-float tempWaterStart = 0.00;
-bool  readTemps = false;
+byte            tempSensorAddress[2][8] = {{0x28, 0xD5, 0x77, 0xCA, 0x06, 0x00, 0x00, 0xFE}, {0x28, 0xFF, 0xCA, 0x7A, 0x86, 0x16, 0x05, 0xAE}};
+float           tempHeaterCurrent = 0.00;
+float           tempWaterCurrent =  0.00;
+float           tempWaterAim =      57.00;
+float           tempWaterStart = 0.00;
+bool            readTemps = false;
+unsigned long   tempReadingTime = 0;
 
 // =============== PID ===============
 int           PIDWindowSize = PID_WindowSize;
 unsigned long PIDWindowStartTime = 0;
 float         PIDRelayOnTime = 0.0;
 float         PIDParams[9] = {PID_Kp, PID_Ki, PID_Kd, PID_Kp_Agg, PID_Ki_Agg, PID_Kd_Agg, PID_Agg_Threshold, PID_SampleTime, PID_WindowSize};
-String         PIDParamsName[9] = {"kP", "kI", "kD:", "kP (aggressive):", "kI (aggressive):", "kD (aggressive):", "Aggr. threshold:", "Sample time:", "Window size:"};
+String        PIDParamsName[9] = {"kP", "kI", "kD:", "kP (aggressive):", "kI (aggressive):", "kD (aggressive):", "Aggr. threshold:", "Sample time:", "Window size:"};
 float         PIDParamsMin[9] = {1, 0, 0, 1, 0, 0, 5, 500, 1000}; // Min PID parameter values
 float         PIDParamsMax[9] = {180, 10, 10, 200, 20, 20, 40, 30000, 60000}; // Max PID parameter values
 byte          PIDParamsDecimals[9] = {0, 1, 1, 0, 1, 1, 0, 0, 0}; // Nr of decimals for each parameter
@@ -178,7 +175,7 @@ void setup() {
     // LCD-error, beep sound?
   }
 
-}
+} 
 
 
 /* ======================== LOOP ========================= */
@@ -187,35 +184,35 @@ void loop() {
   if (readTemps) updateTempReadings();
   updatePID(PIDEnabled);
   getButtonStates();
-  switch (mode) {
-    case 0:         // System check
+  switch (mode) {   // Mode {MODE_check, MODE_start, MODE_setTemp, MODE_setTime, MODE_warmUp, MODE_ready, MODE_cook, MODE_editParams, MODE_manual, MODE_error, MODE_stop};
+    case MODE_check:         // System check
       systemCheck();
       break;
-    case 5:         // Start menu ("Automatic", "Manual" or "Edit parameters")
+    case MODE_start:         // Start menu ("Automatic", "Manual" or "Edit parameters")
       startupMenu();
       break;
-    case 10:         // Set water temperature aim
+    case MODE_setTemp:         // Set water temperature aim
       setTempMenu();
       break;
-    case 20:         // Set time
+    case MODE_setTime:         // Set time
       setTimeMenu();
       break;
-    case 30:         // Heat to water temperature aim
+    case MODE_warmUp:         // Heat to water temperature aim
       warmUp();
       break;
-    case 35:         // Buzzes and waits to start timer
+    case MODE_ready:         // Buzzes and waits to start timer
       readyToCook();
       break;
-    case 40:         // Keeps temp and counts down
+    case MODE_cook:         // Keeps temp and counts down
       cook();
       break;
-    case 100:        // Edit PID and other parameters
+    case MODE_editParams:        // Edit PID and other parameters
       editParams();
       break;
-    case 200:       // Error (check lastError)
+    case MODE_manual:       // Error (check lastError)
       manualMode();
       break;
-    case 255:       // Error (check lastError)
+    case MODE_error:       // Error (check lastError)
       errorMsg();
       break;
     default:
@@ -224,6 +221,8 @@ void loop() {
   }
 }
 
+
+
 /* ======================== MODES ========================= */
 // ********** SYSTEM CHECK - Mode 0 **************
 //   +----------------+
@@ -231,9 +230,9 @@ void loop() {
 //   | Please wait... |
 //   +----------------+
 void systemCheck() {
-  if (lastMode != 0) {
+  if (lastMode != MODE_check) {
     lastError = 3;
-    mode = 255;
+    mode = MODE_error;
     return;
   }
   lcd.setCursor(0, 0);
@@ -270,7 +269,7 @@ void systemCheck() {
     }
   }
   if (lastError != 0) {
-    mode = 255;
+    mode = MODE_error;
     return;
   }
   // Check buttons
@@ -278,11 +277,11 @@ void systemCheck() {
   if (currentOKState || currentCancelState) {
     // If any of the buttons are pressed at start up
     lastError = 2;
-    mode = 255;
+    mode = MODE_error;
     return;
   }
-  lastMode = 0;
-  mode = 5;
+  lastMode = MODE_check;
+  mode = MODE_start;
 }
 
 // ********** START MENU - Mode 5 **************
@@ -292,16 +291,10 @@ void systemCheck() {
 //   +----------------+
 void startupMenu() {
   if (lastMode != mode) {
-    lastMode = mode;
-    readTemps = false;
-    updatePID(false);
-    val = 0;
-    oldVal = val;
-    lcd.clear();
+    newMode(false, false, true, 1);
     lcd.print("Operating mode:");
     lcd.setCursor(0, 1);
     lcd.print("Automatic");
-    enableScrollWheel(true, 1);
   }
 
   if (val != oldVal) {
@@ -314,12 +307,12 @@ void startupMenu() {
 
   if (currentOKState) {
     handleButton(BUTTON_OK);
-    if (oldVal == 0) {        // Automatic mode
-      mode = 10;
+    if (oldVal == 0) {        // Automatic mode, set temp
+      mode = MODE_setTemp;
     } else if (oldVal == 1) { // Manual mode
-      mode = 200;
+      mode = MODE_manual;
     } else if (oldVal == 2) { // Edit parameters
-      mode = 100;
+      mode = MODE_editParams;
     }
   }
 }
@@ -332,16 +325,12 @@ void startupMenu() {
 //   +----------------+
 void setTempMenu() {
   if (lastMode != mode) {
-    lastMode = mode;
-    readTemps = false;
-    updatePID(false);
+    newMode(false, false, true, TEMP_Increment);
     val = tempWaterAim;
     oldVal = val;
-    lcd.clear();
     lcd.print("Set temperature:");
     lcd.setCursor(5, 1);
     printTemp(val);
-    enableScrollWheel(true, TEMP_Increment);
   }
 
   if (val != oldVal) {
@@ -355,12 +344,12 @@ void setTempMenu() {
   if (currentOKState) {
     handleButton(BUTTON_OK);
     tempWaterAim = oldVal;
-    mode = 20;
+    mode = MODE_setTime;
     return;
   }
   if (currentCancelState) {
     handleButton(BUTTON_Cancel);
-    mode = 5;
+    mode = MODE_start;
     return;
   }
 
@@ -373,17 +362,13 @@ void setTempMenu() {
 //   +----------------+
 void setTimeMenu() {
   if (lastMode != mode) {
-    lastMode = mode;
+    newMode(false, false, true, TIME_Increment);
     val = cookingTimeMinutes; // val is in minutes
     oldVal = val;
-    readTemps = false;
-    updatePID(false);
-    lcd.clear();
     lcd.setCursor(3, 0);
     lcd.print("Set time:");
     lcd.setCursor(5, 1);
     printTime(val, false);
-    enableScrollWheel(true, TIME_Increment);
   }
 
   if (val != oldVal) {
@@ -397,15 +382,14 @@ void setTimeMenu() {
   if (currentOKState) {
     handleButton(BUTTON_OK);
     cookingTimeMinutes = oldVal; // cookingTimeMinutes is in seconds
-    mode = 30;
+    mode = MODE_warmUp;
     return;
   }
   if (currentCancelState) {
     handleButton(BUTTON_Cancel);
-    mode = 10;
+    mode = MODE_setTemp;
     return;
   }
-
 }
 
 // ********** WARMING UP - Mode 30 **************
@@ -415,15 +399,9 @@ void setTimeMenu() {
 //   +----------------+
 void warmUp() {
   if (lastMode != mode) {
-    lastMode = mode;
-    enableScrollWheel(false, 0);
-    readTemps = true;
+    newMode(true, true, false, 0);
     tempWaterStart = tempWaterCurrent;
-    modeTimer = 0; //millis() + TIME_CheckWaterTempTimer;
-    lcd.clear();
     lcd.print(" Warming up...");
-    PIDWindowStartTime = millis();
-    updatePID(true);
   }
 #ifdef DEBUG
   lcd.setCursor(0, 0);
@@ -443,7 +421,7 @@ void warmUp() {
     if ((modeTimer != 0) && (millis() > modeTimer)) {
     if (tempWaterCurrent <= tempWaterStart){
       lastError = 4;
-      mode = 255;
+      mode = MODE_error;
       return;
     } else {  // Water temp has risen during the TIME_CheckWaterTempTimer period
       modeTimer = 0;
@@ -451,14 +429,14 @@ void warmUp() {
     }
   */
   if (tempWaterCurrent >= tempWaterAim) {
-    mode = 35;
+    mode = MODE_ready;
     return;
   }
   if (currentCancelState) {
     handleButton(BUTTON_Cancel);
     updatePID(false);
     readTemps = false; // Needed...?
-    mode = 5;   // Should we have a "really cancel?" mode?
+    mode = MODE_start;   // Should we have a "really cancel?" mode?
     return;
   }
 }
@@ -470,17 +448,13 @@ void warmUp() {
 //   +----------------+
 void readyToCook() {
   if (lastMode != mode) {
-    lastMode = mode;
-    readTemps = true;
-    updatePID(true);
-    lcd.clear();
+    newMode(true, true, false, 0);
     lcd.print(" Water is warm!");
     lcd.setCursor(2, 1);
     lcd.print("OK to start?");
     buzzerTimer = 3;
-    modeTimer = millis() + 200;
   }
-  if ((millis() >= modeTimer) && (buzzerTimer > 0)) {
+  if ((millis() >= modeTimer + 200) && (buzzerTimer > 0)) {
     doBuzzer();
     buzzerTimer--;
     modeTimer = millis() + 200;
@@ -488,14 +462,14 @@ void readyToCook() {
 
   if (currentOKState) {
     handleButton(BUTTON_OK);
-    mode = 40;
+    mode = MODE_cook;
     return;
   }
   if (currentCancelState) {
     handleButton(BUTTON_Cancel);
     updatePID(false);
-    readTemps = false; // Needed...?
-    mode = 5; // Should we have a "really cancel?" mode?
+    readTemps = false;
+    mode = MODE_start; // Should we have a "really cancel?" mode?
     return;
   }
 }
@@ -507,21 +481,18 @@ void readyToCook() {
 //   +----------------+
 void cook() {
   if (lastMode != mode) {
-    lastMode = 40;
-    readTemps = true;
-    updatePID(true);
-    lcd.clear();
+    newMode(true, true, false, 0);
     lcd.setCursor(6, 0);
     lcd.print(" <- ");
     printTime(cookingTimeMinutes, false);
     lcd.setCursor(6, 1);
     lcd.print(" -> ");
-    lcd.print(tempWaterAim, 1);
-    lcd.print((char)223);
-    lcd.print("C");
+    printTemp(tempWaterAim);
+    //    lcd.print(tempWaterAim, 1);
+    //    lcd.print((char)223);
+    //    lcd.print("C");
     cookingEndTime = (millis() / 1000 + (cookingTimeMinutes * 60)); // In seconds
     timeRemaining = cookingTimeMinutes / 60; // In seconds
-    modeTimer = 0;
   }
 
   nowRemainingSeconds = (cookingEndTime - (millis() / 1000)); // nowRemainingSeconds in seconds
@@ -551,7 +522,8 @@ void cook() {
     handleButton(BUTTON_Cancel);
     handleButton(BUTTON_OK);
     updatePID(false);
-    mode = 5;
+    readTemps = false;
+    mode = MODE_start;
     return;
   }
 }
@@ -563,19 +535,16 @@ void cook() {
 //   +----------------+
 void editParams() {
   /*
-    float         PIDParams[9] = {PID_Kp, PID_Ki, PID_Kd, PID_Kp_Agg, PID_Ki_Agg, PID_Kd_Agg, PID_Agg_Threshold, PID_SampleTime, PID_WindowSize};
-    float         PIDParamsName[9] = {"kP", "kI", "kD:", "kP (aggressive):", "kI (aggressive):", "kD (aggressive):", "Aggr. threshold:", "Sample time:", "Window size:"};
-    float         PIDParamsMin[9] = {1, 0, 0, 1, 0, 0, 5, 500, 1000}; // Min PID parameter values
-    float         PIDParamsMax[9] = {180, 10, 10, 200, 20, 20, 40, 30000, 60000}; // Max PID parameter values
-    byte          PIDParamsDecimals[9] = {0, 1, 1, 0, 1, 1, 0, 0, 0}; // Nr of decimals for each parameter
+     parameterNr can be changed to modeTimer
   */
   if (lastMode != mode) {
+    newMode(false, false, false, 0);
     lastMode = mode;
     parameterNr = 0;
     paramFirstEdit = true;
   }
   if (parameterNr >= sizeof(PIDParams)) {
-    mode = 10;
+    mode = MODE_start;
     return;
   }
   if (paramFirstEdit) {
@@ -616,32 +585,69 @@ void editParams() {
 // ********** MANUAL MODE - Mode 200 **************
 //   +----------------+
 //   |Water:    57.0°C|
-//   |Power:       2.5|
+//   |Power:      22.5|
 //   +----------------+
 void manualMode() {
-  if (lastMode != 100) {
-    readTemps = true;
-    PIDEnabled = true;
-    lastMode = 100;
-    lcd.clear();
-    lcd.print("Water:");
+  if (lastMode != mode) {
+    newMode(true, true, true, 0.1);
+    lcd.print("Water:    ");
+    printTemp(tempWaterCurrent);
+    modeTimer = now + TEMP_TempReadingFrequency;
     lcd.setCursor(0, 1);
     lcd.print("Power:");
-    modeTimer = 0;
+    PIDWindowStartTime = 0;
+  }
+
+  // TODO: Change this to a recoverable state after the temp has dropped
+  if ((tempWaterCurrent >= TEMP_MaxWaterTemp) || (tempHeaterCurrent >= TEMP_MaxHeaterTemp)) {
+    digitalWrite(PIN_RelayTransistor, LOW);
+    heaterOn = false;
+    lastError = (tempWaterCurrent >= TEMP_MaxWaterTemp) ? 5 : 6;
+    mode = MODE_error;
+    return;
+  }
+
+  unsigned long now = millis();
+  if (val != oldVal) {
+    oldVal = val;
+    lcd.setCursor(12, 1);
+    if (oldVal < 10) {
+      lcd.print(" ");
+    }
+    lcd.print(oldVal, 1);
+    PIDWindowStartTime = now; // Create new time window
+  }
+
+  if (now > (PIDWindowStartTime + PID_WindowSize)) { // Are we outside the time window?
+    PIDWindowStartTime = now;
+  } else {  // We're inside the time window
+    if (now > (PIDWindowStartTime + (oldVal * 1000))) { // Are we outisde the "heater on" window?
+      digitalWrite(PIN_RelayTransistor, LOW);
+      heaterOn = false;
+    } else {
+      digitalWrite(PIN_RelayTransistor, HIGH);
+      heaterOn = true;
+    }
+  }
+
+  if (now >= modeTimer) { // Time to update the temp reading on the lcd
+    lcd.setCursor(10, 0);
+    printTemp(tempWaterCurrent);
+    modeTimer = now + TEMP_TempReadingFrequency;
   }
 
   if (currentCancelState) {
     handleButton(BUTTON_Cancel);
-    mode = 10;
+    mode = MODE_start;
     return;
   }
 
+  // TODO: OK should go in to "maintain current temp"-mode
   if (currentOKState) {
     handleButton(BUTTON_OK);
-    mode = 40;
+    mode = MODE_start;
     return;
   }
-
 }
 
 
@@ -651,11 +657,8 @@ void manualMode() {
 //   |Temp sensors!   |
 //   +----------------+
 void errorMsg() {
-  digitalWrite(PIN_RelayTransistor, LOW);
-  heaterOn = false;
-  readTemps = false;
-  PIDEnabled = false;
-  if (lastMode == 255) return;
+  stopAll();
+  if (lastMode == MODE_error) return;
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("ERROR ");
@@ -678,14 +681,33 @@ void errorMsg() {
       lcd.print("Unknown error");
       break;
   }
-  lastMode = 255;
+  lastMode = MODE_error;
 }
 
 // ********** ERROR MESSAGE - Mode unknown and default **************
 void stopAll() {
-  PIDEnabled = false;
-  mode = 255;
+  updatePID(false);
+  digitalWrite(PIN_RelayTransistor, LOW);
+  heaterOn = false;
+  readTemps = false;
+  mode = MODE_error;
   lastError = 255;
+}
+
+/* ======================== MISC. ========================= */
+
+void newMode(bool readT, bool updateP, bool enableSW, float swInc) {
+  lastMode = mode;
+  readTemps = readT;
+  modeTimer = 0;
+  if (updateP) PIDWindowStartTime = millis();
+  updatePID(updateP);
+  if (enableSW) {
+    val = 0;
+    oldVal = val;
+  }
+  lcd.clear();
+  enableScrollWheel(enableSW, swInc);
 }
 
 /* ======================== PID ========================= */
@@ -745,6 +767,7 @@ void printTime(float tm, bool abb) {
   lcd.print(txt);
 }
 
+
 void doBuzzer() {
   for (byte i = 0; i < 4; i++) {
     tone(PIN_Buzzer, BUZZER_Frequency, BUZZER_Duration);
@@ -764,13 +787,13 @@ void GetParams() {
 }
 
 void PutParam(float val, byte nr) {
-  if (val != PIDParams[nr]){
+  if (val != PIDParams[nr]) {
     EEPROM.put(nr * 4, val);
   }
   /*
-  for (int nr = 0; nr < sizeof(PIDParams); nr++) {
+    for (int nr = 0; nr < sizeof(PIDParams); nr++) {
     EEPROM.put(nr * 4, PIDParams[nr]);
-  }
+    }
   */
 }
 
@@ -884,7 +907,7 @@ void getButtonStates() {
 
 // Continuous temperature reading
 void updateTempReadings() {
-  if ((mode == 0) || (mode == 255)) return;
+  if ((mode == MODE_check) || (mode == MODE_error)) return;
   if (tempReadingTime == 0) {
     for (byte a = 0; a < 2; a++) {
       tempSensors.reset();
