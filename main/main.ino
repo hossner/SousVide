@@ -31,7 +31,7 @@
 */
 
 /* ======================== DEFINITIONS ========================= */
-#define DEBUG
+//#define DEBUG
 
 #define SW_Version              "v 0.7" // Max 5 chars
 
