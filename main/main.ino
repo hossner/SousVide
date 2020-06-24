@@ -1,6 +1,3 @@
-// https://github.com/adafruit/Sous_Viduino/blob/master/Sous_Viduino.ino
-// https://playground.arduino.cc/Code/PIDAutotuneLibrary/
-// http://brettbeauregard.com/blog/2012/01/arduino-pid-autotune-library/#more-1893
 #include <Wire.h>
 #include <LiquidCrystal_PCF8574.h>
 #include <CapacitiveSensor.h>
@@ -36,7 +33,7 @@
 /* ======================== DEFINITIONS ========================= */
 #define DEBUG
 
-#define SW_Version              "v 0.6" // Max 5 chars
+#define SW_Version              "v 0.7" // Max 5 chars
 
 #define PIN_SWSensorA           2
 #define PIN_SWSensorB           3
@@ -50,7 +47,6 @@
 #define PID_Kp              100   // Find this by auto tune!
 #define PID_Ki              0.1
 #define PID_Kd              5.0
-
 #define PID_Kp_Agg          150
 #define PID_Ki_Agg          0.0
 #define PID_Kd_Agg          0.0
@@ -78,24 +74,24 @@
 #define TEMP_MaxWaterTemp  90.0
 #define TEMP_MinWaterTemp  30.0
 #define TEMP_Increment      0.1
-#define TEMP_MaxWaterTempDiff 0.05
+//#define TEMP_MaxWaterTempDiff 0.05
 
 #define TIME_MaxTime    599 // in minutes
 #define TIME_MinTime    10   // in minutes
 #define TIME_Increment  1.0 // in minutes
-#define TIME_CheckWaterTempTimer 300000 // Time in millisec after which the water temp must have risen
+// #define TIME_CheckWaterTempTimer 300000 // Time in millisec after which the water temp must have risen
 
 /* ======================== GLOBAL VARIABLES ========================= */
-
 
 // =============== Mode handling ===============
 
 enum            Mode {MODE_check, MODE_start, MODE_setTemp, MODE_setTime, MODE_warmUp, MODE_ready, MODE_cook, MODE_editParams, MODE_manual, MODE_error, MODE_stop};
+enum            ErrorMode {ERR_NoError, ERR_InvalidMode, ERR_TempSensors, ERR_Buttons, ERR_WaterHot, ERR_HeaterHot, ERR_Unknown};
 String          operatingModeName[3] = {"Automatic       ", "Manual          ", "Edit parameters "};
+String          errorModeName[7] = {"No error        ", "Invalid mode    ", "Temp sensors    ", "Touch buttons   ", "Water too hot   ", "Heater too hot  ", "Unknown error   "};
 Mode            mode = MODE_check;
-byte            lastMode = MODE_check;
-byte            lastError = 0;
-unsigned long   modeTimer = 0; // Generic, mode common timer
+Mode            lastMode = MODE_check;
+ErrorMode       lastError = ERR_NoError;
 
 // =============== Scroll Wheel sensor ===============
 volatile unsigned int tmpA = 0;
@@ -108,10 +104,10 @@ volatile float        swIncrement = 0.1;
 bool                  scrollWheelEnabled = false;
 
 // =============== Buttons ===============
-unsigned long OKClickTime = 0;
-unsigned long CancelClickTime = 0;
-unsigned long OKForcedDown = 0;
-unsigned long CancelForcedDown = 0;
+unsigned long oKClickTime = 0;
+unsigned long cancelClickTime = 0;
+unsigned long oKForcedDown = 0;
+unsigned long cancelForcedDown = 0;
 bool          currentOKState = false;
 bool          currentCancelState = false;
 
@@ -142,8 +138,9 @@ unsigned long   cookingEndTime = 0;  // In milliseconds
 byte            buzzerTimer = 0;
 long            nowRemainingSeconds = 0; // In seconds
 bool            heaterOn = false;
-byte            parameterNr = 0; // The parameter that is edited just now
 bool            paramFirstEdit = true;
+unsigned long   modeTimer = 0; // Generic, mode common timer
+
 
 LiquidCrystal_PCF8574   lcd(LCD_Address);
 OneWire                 tempSensors(PIN_TempSensors);
@@ -154,7 +151,6 @@ CapacitiveSensor        btnCancel = CapacitiveSensor(PIN_BtnCommon, PIN_BtnCance
 /* ======================== SETUP ========================= */
 
 void setup() {
-  // OUTPUTS
   // Relay
   pinMode(PIN_RelayTransistor, OUTPUT);
   // Buzzer
@@ -163,20 +159,17 @@ void setup() {
   lcd.begin(LCD_Width, LCD_Height);
   lcd.setBacklight(LCD_Brightnes);
 
-  // INPUTS
   // Touch buttons
   // ...
   // Scroll wheel
   // ...
-  // Temp sensors
+  // LCD display
   Wire.begin();
   Wire.beginTransmission(LCD_Address);
-  if (Wire.endTransmission() != 0) {
+  if (Wire.endTransmission() != 0) { // No LCD detected
     // LCD-error, beep sound?
   }
-
-} 
-
+}
 
 /* ======================== LOOP ========================= */
 
@@ -209,7 +202,7 @@ void loop() {
     case MODE_editParams:        // Edit PID and other parameters
       editParams();
       break;
-    case MODE_manual:       // Error (check lastError)
+    case MODE_manual:       // Run in manual mode
       manualMode();
       break;
     case MODE_error:       // Error (check lastError)
@@ -221,8 +214,6 @@ void loop() {
   }
 }
 
-
-
 /* ======================== MODES ========================= */
 // ********** SYSTEM CHECK - Mode 0 **************
 //   +----------------+
@@ -231,7 +222,7 @@ void loop() {
 //   +----------------+
 void systemCheck() {
   if (lastMode != MODE_check) {
-    lastError = 3;
+    lastError = ERR_InvalidMode;
     mode = MODE_error;
     return;
   }
@@ -241,8 +232,7 @@ void systemCheck() {
   lcd.print(")");
   lcd.setCursor(0, 1);
   lcd.print(" Please wait...");
-
-  GetParams();
+  getParams();
   thePID.SetOutputLimits(0, PIDParams[7]);
   thePID.SetSampleTime(PIDParams[8]);
 
@@ -264,11 +254,11 @@ void systemCheck() {
     }
     raw = (datas[a][1] << 8) | datas[a][0];
     if (raw < 80) { // ((raw < 80) || (raw > 1600)) {
-      lastError = 1;
+      lastError = ERR_TempSensors; // Invalid sensor readings
       break;
     }
   }
-  if (lastError != 0) {
+  if (lastError != ERR_NoError) {
     mode = MODE_error;
     return;
   }
@@ -276,7 +266,7 @@ void systemCheck() {
   getButtonStates();
   if (currentOKState || currentCancelState) {
     // If any of the buttons are pressed at start up
-    lastError = 2;
+    lastError = ERR_Buttons;
     mode = MODE_error;
     return;
   }
@@ -296,7 +286,6 @@ void startupMenu() {
     lcd.setCursor(0, 1);
     lcd.print("Automatic");
   }
-
   if (val != oldVal) {
     lcd.setCursor(0, 1);
     if (val < 0) val = 2;
@@ -304,7 +293,6 @@ void startupMenu() {
     oldVal = val;
     lcd.print(operatingModeName[byte(oldVal)]);
   }
-
   if (currentOKState) {
     handleButton(BUTTON_OK);
     if (oldVal == 0) {        // Automatic mode, set temp
@@ -332,7 +320,6 @@ void setTempMenu() {
     lcd.setCursor(5, 1);
     printTemp(val);
   }
-
   if (val != oldVal) {
     lcd.setCursor(5, 1);
     if (val < TEMP_MinWaterTemp) val = TEMP_MinWaterTemp;
@@ -340,7 +327,6 @@ void setTempMenu() {
     oldVal = val;
     printTemp(oldVal);
   }
-
   if (currentOKState) {
     handleButton(BUTTON_OK);
     tempWaterAim = oldVal;
@@ -352,7 +338,6 @@ void setTempMenu() {
     mode = MODE_start;
     return;
   }
-
 }
 
 // ********** SET TIME MENU - Mode 20 **************
@@ -370,15 +355,14 @@ void setTimeMenu() {
     lcd.setCursor(5, 1);
     printTime(val, false);
   }
-
   if (val != oldVal) {
     lcd.setCursor(5, 1);
-    if (val < (TIME_MinTime)) val = TIME_MinTime;
-    if (val > (TIME_MaxTime)) val = TIME_MaxTime;
     oldVal = val;
+    if (oldVal < (TIME_MinTime)) oldVal = TIME_MinTime;
+    if (oldVal > (TIME_MaxTime)) oldVal = TIME_MaxTime;
     printTime(oldVal, false);
+    val = oldVal;
   }
-
   if (currentOKState) {
     handleButton(BUTTON_OK);
     cookingTimeMinutes = oldVal; // cookingTimeMinutes is in seconds
@@ -407,7 +391,6 @@ void warmUp() {
   lcd.setCursor(0, 0);
   lcd.print(PIDRelayOnTime, 2);
 #endif
-
   lcd.setCursor(0, 1);
   lcd.print(tempWaterCurrent, 1);
   lcd.print((char)223);
@@ -419,13 +402,13 @@ void warmUp() {
   // Check to time out if water temp not increases...
   /*
     if ((modeTimer != 0) && (millis() > modeTimer)) {
-    if (tempWaterCurrent <= tempWaterStart){
-      lastError = 4;
-      mode = MODE_error;
-      return;
-    } else {  // Water temp has risen during the TIME_CheckWaterTempTimer period
-      modeTimer = 0;
-    }
+      if (tempWaterCurrent <= tempWaterStart){
+        lastError = 4;
+        mode = MODE_error;
+        return;
+      } else {  // Water temp has risen during the TIME_CheckWaterTempTimer period
+        modeTimer = 0;
+      }
     }
   */
   if (tempWaterCurrent >= tempWaterAim) {
@@ -494,7 +477,6 @@ void cook() {
     cookingEndTime = (millis() / 1000 + (cookingTimeMinutes * 60)); // In seconds
     timeRemaining = cookingTimeMinutes / 60; // In seconds
   }
-
   nowRemainingSeconds = (cookingEndTime - (millis() / 1000)); // nowRemainingSeconds in seconds
   if ((nowRemainingSeconds >= 0) && (nowRemainingSeconds != timeRemaining)) {
     timeRemaining = nowRemainingSeconds;
@@ -505,7 +487,6 @@ void cook() {
   lcd.setCursor(0, 0);
   lcd.print(PIDRelayOnTime, 2);
 # endif
-
   lcd.setCursor(0, 1);
   printTemp(tempWaterCurrent);
 
@@ -517,7 +498,6 @@ void cook() {
       modeTimer = millis() + 200;
     }
   }
-
   if ((currentCancelState) || (currentOKState)) {
     handleButton(BUTTON_Cancel);
     handleButton(BUTTON_OK);
@@ -534,53 +514,46 @@ void cook() {
 //   |20.20           |
 //   +----------------+
 void editParams() {
-  /*
-     parameterNr can be changed to modeTimer
-  */
   if (lastMode != mode) {
     newMode(false, false, false, 0);
-    lastMode = mode;
-    parameterNr = 0;
     paramFirstEdit = true;
   }
-  if (parameterNr >= sizeof(PIDParams)) {
+  if (modeTimer >= sizeof(PIDParams)) {
     mode = MODE_start;
     return;
   }
   if (paramFirstEdit) {
     lcd.clear();
     byte swVal;
-    if (PIDParamsDecimals[parameterNr] == 0) {
+    if (PIDParamsDecimals[modeTimer] == 0) {
       swVal = 1;
     } else {
       swVal = 0.1;
     }
     enableScrollWheel(true, swVal);
-    lcd.print(PIDParamsName[parameterNr]);
+    lcd.print(PIDParamsName[modeTimer]);
     lcd.setCursor(0, 1);
-    val = PIDParams[parameterNr];
+    val = PIDParams[modeTimer];
     oldVal = val;
-    lcd.print(val, PIDParamsDecimals[parameterNr]);
+    lcd.print(oldVal, PIDParamsDecimals[modeTimer]);
     paramFirstEdit = false;
   }
   if (val != oldVal) {
     oldVal = val;
     lcd.setCursor(0, 1);
-    if (val < (PIDParamsMin[parameterNr])) val = PIDParamsMin[parameterNr];
-    if (val > (PIDParamsMax[parameterNr])) val = PIDParamsMax[parameterNr];
-    lcd.print(val, PIDParamsDecimals[parameterNr]);
+    if (oldVal < (PIDParamsMin[modeTimer])) oldVal = PIDParamsMin[modeTimer];
+    if (oldVal > (PIDParamsMax[modeTimer])) oldVal = PIDParamsMax[modeTimer];
+    lcd.print(oldVal, PIDParamsDecimals[modeTimer]);
     lcd.print("     ");
   }
-
   if (currentOKState) {
     handleButton(BUTTON_OK);
-    PutParam(val, parameterNr);
-    PIDParams[parameterNr] = val;
-    parameterNr++;
+    putParam(oldVal, modeTimer);
+    PIDParams[modeTimer] = oldVal;
+    modeTimer++;
     paramFirstEdit = true;
   }
 }
-
 
 // ********** MANUAL MODE - Mode 200 **************
 //   +----------------+
@@ -592,21 +565,19 @@ void manualMode() {
     newMode(true, true, true, 0.1);
     lcd.print("Water:    ");
     printTemp(tempWaterCurrent);
-    modeTimer = now + TEMP_TempReadingFrequency;
+    modeTimer = millis() + TEMP_TempReadingFrequency;
     lcd.setCursor(0, 1);
     lcd.print("Power:");
     PIDWindowStartTime = 0;
   }
-
   // TODO: Change this to a recoverable state after the temp has dropped
   if ((tempWaterCurrent >= TEMP_MaxWaterTemp) || (tempHeaterCurrent >= TEMP_MaxHeaterTemp)) {
     digitalWrite(PIN_RelayTransistor, LOW);
     heaterOn = false;
-    lastError = (tempWaterCurrent >= TEMP_MaxWaterTemp) ? 5 : 6;
+    lastError = (tempWaterCurrent >= TEMP_MaxWaterTemp) ? ERR_WaterHot : ERR_HeaterHot;
     mode = MODE_error;
     return;
   }
-
   unsigned long now = millis();
   if (val != oldVal) {
     oldVal = val;
@@ -617,7 +588,6 @@ void manualMode() {
     lcd.print(oldVal, 1);
     PIDWindowStartTime = now; // Create new time window
   }
-
   if (now > (PIDWindowStartTime + PID_WindowSize)) { // Are we outside the time window?
     PIDWindowStartTime = now;
   } else {  // We're inside the time window
@@ -629,27 +599,23 @@ void manualMode() {
       heaterOn = true;
     }
   }
-
   if (now >= modeTimer) { // Time to update the temp reading on the lcd
     lcd.setCursor(10, 0);
     printTemp(tempWaterCurrent);
     modeTimer = now + TEMP_TempReadingFrequency;
   }
-
   if (currentCancelState) {
     handleButton(BUTTON_Cancel);
     mode = MODE_start;
     return;
   }
-
-  // TODO: OK should go in to "maintain current temp"-mode
+  // TODO: OK should give option to go to "maintain current temp"-mode
   if (currentOKState) {
     handleButton(BUTTON_OK);
     mode = MODE_start;
     return;
   }
 }
-
 
 // ********** ERROR MESSAGE - Mode 255 **************
 //   +----------------+
@@ -662,25 +628,10 @@ void errorMsg() {
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("ERROR ");
-  lcd.print(lastError, DEC);
+  //lcd.print(lastError, DEC);
+  lcd.print(lastError);
   lcd.setCursor(0, 1);
-  switch (lastError) {
-    case 1:         // No temp sensor or erronuos values read
-      lcd.print("Temp sensors!");
-      break;
-    case 2:         // Buttons pressed or erronuos values read
-      lcd.print("Clean buttons?");
-      break;
-    case 3:       // Error in state machine
-      lcd.print("Internal error");
-      break;
-    case 4:
-      lcd.print("Water temp error");
-      break;
-    default:
-      lcd.print("Unknown error");
-      break;
-  }
+  lcd.print(errorModeName[lastError]);
   lastMode = MODE_error;
 }
 
@@ -691,7 +642,7 @@ void stopAll() {
   heaterOn = false;
   readTemps = false;
   mode = MODE_error;
-  lastError = 255;
+  lastError = ERR_Unknown;
 }
 
 /* ======================== MISC. ========================= */
@@ -767,7 +718,6 @@ void printTime(float tm, bool abb) {
   lcd.print(txt);
 }
 
-
 void doBuzzer() {
   for (byte i = 0; i < 4; i++) {
     tone(PIN_Buzzer, BUZZER_Frequency, BUZZER_Duration);
@@ -777,24 +727,17 @@ void doBuzzer() {
 
 /* ======================== EEPROM ========================= */
 
-
-void GetParams() {
-  // float         PIDParams[9] = {PID_Kp, PID_Ki, PID_Kd, PID_Kp_Agg, PID_Ki_Agg, PID_Kd_Agg, PID_Agg_Threshold, PID_SampleTime, PID_WindowSize};
+void getParams() {
   float tmpVal;
   for (byte nr = 0; nr < sizeof(PIDParams); nr++) {
     val = EEPROM.get(nr * 4, PIDParams[nr]);
   }
 }
 
-void PutParam(float val, byte nr) {
+void putParam(float val, byte nr) {
   if (val != PIDParams[nr]) {
     EEPROM.put(nr * 4, val);
   }
-  /*
-    for (int nr = 0; nr < sizeof(PIDParams); nr++) {
-    EEPROM.put(nr * 4, PIDParams[nr]);
-    }
-  */
 }
 
 /* ======================== SCROLL WHEEL ========================= */
@@ -833,7 +776,6 @@ void triggerSWSA() {
   oldA = tmpA;
 }
 
-
 void triggerSWSB() {
   tmpB = digitalRead(PIN_SWSensorB);
   if (tmpB == 1) {
@@ -856,9 +798,9 @@ void triggerSWSB() {
 
 void handleButton(bool okBtn) {
   if (okBtn) {
-    OKForcedDown = millis() + BUTTON_DebounceTime;
+    oKForcedDown = millis() + BUTTON_DebounceTime;
   } else {
-    CancelForcedDown = millis() + BUTTON_DebounceTime;
+    cancelForcedDown = millis() + BUTTON_DebounceTime;
   }
 }
 
@@ -866,42 +808,41 @@ void handleButton(bool okBtn) {
 void getButtonStates() {
   bool tmpState = (btnOK.capacitiveSensor(BUTTON_ReadTime) > BUTTON_CapThreshold);
   if (!currentOKState) {
-    if ((tmpState) && (OKForcedDown < millis())) {
+    if ((tmpState) && (oKForcedDown < millis())) {
       currentOKState = true;
-      OKClickTime = millis();
+      oKClickTime = millis();
     }
   } else {
-    if (OKForcedDown >= millis()) {
+    if (oKForcedDown >= millis()) {
       currentOKState = false;
       return;
     }
-    if ((millis() - OKClickTime) < BUTTON_DebounceTime) return;
+    if ((millis() - oKClickTime) < BUTTON_DebounceTime) return;
     if (tmpState) {
-      OKClickTime = millis();
+      oKClickTime = millis();
     } else {
       currentOKState = false;
     }
   }
   tmpState = (btnCancel.capacitiveSensor(BUTTON_ReadTime) > BUTTON_CapThreshold);
   if (!currentCancelState) {
-    if ((tmpState) && (CancelForcedDown < millis())) {
+    if ((tmpState) && (cancelForcedDown < millis())) {
       currentCancelState = true;
-      CancelClickTime = millis();
+      cancelClickTime = millis();
     }
   } else {
-    if (CancelForcedDown >= millis()) {
+    if (cancelForcedDown >= millis()) {
       currentCancelState = false;
       return;
     }
-    if ((millis() - CancelClickTime) < BUTTON_DebounceTime) return;
+    if ((millis() - cancelClickTime) < BUTTON_DebounceTime) return;
     if (tmpState) {
-      CancelClickTime = millis();
+      cancelClickTime = millis();
     } else {
       currentCancelState = false;
     }
   }
 }
-
 
 /* ======================== TEMP SENSORS ========================= */
 
